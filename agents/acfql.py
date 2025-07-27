@@ -23,23 +23,27 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         """Compute the FQL critic loss."""
 
         if self.config["action_chunking"]:
-            batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))
+            batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))  # 将整个动作序列展平成一个单一的长向量
         else:
             batch_actions = batch["actions"][..., 0, :] # take the first action
         
         # TD loss
         rng, sample_rng = jax.random.split(rng)
-        next_actions = self.sample_actions(batch['next_observations'][..., -1, :], rng=sample_rng)
+        next_actions = self.sample_actions(batch['next_observations'][..., -1, :], rng=sample_rng)  # 为下一个状态 s' 采样一个动作 a'
 
+        # 使用目标网络计算 Q(s', a')
         next_qs = self.network.select(f'target_critic')(batch['next_observations'][..., -1, :], actions=next_actions)
         if self.config['q_agg'] == 'min':
             next_q = next_qs.min(axis=0)
-        else:
+        else: 
             next_q = next_qs.mean(axis=0)
         
+        # 在数据集的 sample_sequence 方法中，奖励已经被累积,所以reward只取最后一个时间步的奖励
+        # reward累加，如果action chunking中有一步被mask掉，那么reward就不能累加吧？ 怀疑代码写错！！！修改，需要把dataset.py里面的valid根据mask修改一下
         target_q = batch['rewards'][..., -1] + \
             (self.config['discount'] ** self.config["horizon_length"]) * batch['masks'][..., -1] * next_q
 
+        # 使用主网络计算当前 Q 值 (Current Q-Value)
         q = self.network.select('critic')(batch['observations'], actions=batch_actions, params=grad_params)
         
         critic_loss = (jnp.square(q - target_q) * batch['valid'][..., -1]).mean()
@@ -54,19 +58,25 @@ class ACFQLAgent(flax.struct.PyTreeNode):
     def actor_loss(self, batch, grad_params, rng):
         """Compute the FQL actor loss."""
         if self.config["action_chunking"]:
-            batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))  # fold in horizon_length together with action_dim
+            batch_actions = jnp.reshape(batch["actions"], (batch["actions"].shape[0], -1))  # 将整个动作序列展平成一个单一的长向量s
         else:
             batch_actions = batch["actions"][..., 0, :] # take the first one
         batch_size, action_dim = batch_actions.shape
         rng, x_rng, t_rng = jax.random.split(rng, 3)
 
         # BC flow loss.
+        # 1. 准备路径的起点和终点
         x_0 = jax.random.normal(x_rng, (batch_size, action_dim))
         x_1 = batch_actions
+
+        # 2. 在路径上随机采样一个时间点 t 和对应的位置 x_t
         t = jax.random.uniform(t_rng, (batch_size, 1))
         x_t = (1 - t) * x_0 + t * x_1
-        vel = x_1 - x_0
 
+        # 3. 计算从起点到终点的恒定速度向量
+        vel = x_1 - x_0
+        
+        # 4. 让网络根据当前状态、路径位置 x_t 和时间 t，预测速度向量
         pred = self.network.select('actor_bc_flow')(batch['observations'], x_t, t, params=grad_params)
 
         # only bc on the valid chunk indices
@@ -75,12 +85,12 @@ class ACFQLAgent(flax.struct.PyTreeNode):
                 jnp.reshape(
                     (pred - vel) ** 2, 
                     (batch_size, self.config["horizon_length"], self.config["action_dim"]) 
-                ) * batch["valid"][..., None]
+                ) * batch["valid"][..., None]  # 所有无效时间步的误差贡献都已经被消除,还是和前面一样，mask没有消除！！！
             )
         else:
             bc_flow_loss = jnp.mean(jnp.square(pred - vel))
 
-        if self.config["actor_type"] == "distill-ddpg":
+        if self.config["actor_type"] == "distill-ddpg": # 行为约束的方式不同
             # Distillation loss.
             rng, noise_rng = jax.random.split(rng)
             noises = jax.random.normal(noise_rng, (batch_size, action_dim))
@@ -88,7 +98,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             actor_actions = self.network.select('actor_onestep_flow')(batch['observations'], noises, params=grad_params)
             distill_loss = jnp.mean((actor_actions - target_flow_actions) ** 2)
             
-            # Q loss.
+            # Q loss.  # 因为ddpg算法需要最大化Q值
             actor_actions = jnp.clip(actor_actions, -1, 1)
 
             qs = self.network.select(f'critic')(batch['observations'], actions=actor_actions)
@@ -127,9 +137,9 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         return loss, info
 
     def target_update(self, network, module_name):
-        """Update the target network."""
+        """Update the target network.目标网络更新"""
         new_target_params = jax.tree_util.tree_map(
-            lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']),
+            lambda p, tp: p * self.config['tau'] + tp * (1 - self.config['tau']), # p: 代表主网络的参数 (parameter)。 # tp: 代表旧的目标网络的参数 (target parameter)。
             self.network.params[f'modules_{module_name}'],
             self.network.params[f'modules_target_{module_name}'],
         )
@@ -141,9 +151,9 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         new_rng, rng = jax.random.split(agent.rng)
 
         def loss_fn(grad_params):
-            return agent.total_loss(batch, grad_params, rng=rng)
+            return agent.total_loss(batch, grad_params, rng=rng)  
 
-        new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)
+        new_network, info = agent.network.apply_loss_fn(loss_fn=loss_fn)   
         agent.target_update(new_network, 'critic')
         return agent.replace(network=new_network, rng=new_rng), info
 
@@ -171,7 +181,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
                 (
                     *observations.shape[: -len(self.config['ob_dims'])],  # batch_size
                     self.config['action_dim'] * \
-                        (self.config['horizon_length'] if self.config["action_chunking"] else 1),
+                        (self.config['horizon_length'] if self.config["action_chunking"] else 1), # action_dim
                 ),
             )
             actions = self.network.select(f'actor_onestep_flow')(observations, noises)
@@ -180,6 +190,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         elif self.config["actor_type"] == "best-of-n":
             action_dim = self.config['action_dim'] * \
                         (self.config['horizon_length'] if self.config["action_chunking"] else 1)
+            # (batch_size, N, action_dim)
             noises = jax.random.normal(
                 rng,
                 (
@@ -187,8 +198,9 @@ class ACFQLAgent(flax.struct.PyTreeNode):
                     self.config["actor_num_samples"], action_dim
                 ),
             )
+            # (B, N, obs_dim)
             observations = jnp.repeat(observations[..., None, :], self.config["actor_num_samples"], axis=-2)
-            actions = self.compute_flow_actions(observations, noises)
+            actions = self.compute_flow_actions(observations, noises)  #  MLP 组件设计为处理任意批次形状,所以多了一个维度，没有关系
             actions = jnp.clip(actions, -1, 1)
             if self.config["q_agg"] == "mean":
                 q = self.network.select("critic")(observations, actions).mean(axis=0)
@@ -200,7 +212,7 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             indices = indices.reshape(-1)
             bsize = len(indices)
             actions = jnp.reshape(actions, (-1, self.config["actor_num_samples"], action_dim))[jnp.arange(bsize), indices, :].reshape(
-                bshape + (action_dim,))
+                bshape + (action_dim,))  # (B, D)
 
         return actions
 
@@ -214,10 +226,13 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         if self.config['encoder'] is not None:
             observations = self.network.select('actor_bc_flow_encoder')(observations)
         actions = noises
-        # Euler method.
+        # 使用欧拉法，通过多步迭代来模拟“流动”过程
         for i in range(self.config['flow_steps']):
-            t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps'])
+            # a. 确定当前的时间步 t
+            t = jnp.full((*observations.shape[:-1], 1), i / self.config['flow_steps']) # 这行代码的作用是创建一个新的张量（tensor）t。这个张量 t 的形状与批次（batch）中的样本数相对应，并且它的所有元素都被赋予了同一个值，这个值代表了当前在 [0, 1] 区间内的模拟时间点。
+            # b. 查询流模型，获取在当前位置(actions)和时间(t)的速度向量
             vels = self.network.select('actor_bc_flow')(observations, actions, t, is_encoded=True)
+            # c. 欧拉法更新：让动作朝着速度方向前进一小步
             actions = actions + vels / self.config['flow_steps']
         actions = jnp.clip(actions, -1, 1)
         return actions
@@ -241,11 +256,11 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         rng = jax.random.PRNGKey(seed)
         rng, init_rng = jax.random.split(rng, 2)
 
-        ex_times = ex_actions[..., :1]
-        ob_dims = ex_observations.shape
-        action_dim = ex_actions.shape[-1]
+        ex_times = ex_actions[..., :1] # (1,)
+        ob_dims = ex_observations.shape # (46,)
+        action_dim = ex_actions.shape[-1] # 5
         if config["action_chunking"]:
-            full_actions = jnp.concatenate([ex_actions] * config["horizon_length"], axis=-1)
+            full_actions = jnp.concatenate([ex_actions] * config["horizon_length"], axis=-1)  # （25，）
         else:
             full_actions = ex_actions
         full_action_dim = full_actions.shape[-1]
@@ -259,22 +274,24 @@ class ACFQLAgent(flax.struct.PyTreeNode):
             encoders['actor_onestep_flow'] = encoder_module()
 
         # Define networks.
-        critic_def = Value(
-            hidden_dims=config['value_hidden_dims'],
+        critic_def = Value( # # 输出维度是1
+            hidden_dims=config['value_hidden_dims'], 
             layer_norm=config['layer_norm'],
             num_ensembles=config['num_qs'],
             encoder=encoders.get('critic'),
         )
 
-        actor_bc_flow_def = ActorVectorField(
+        # 输出速度
+        actor_bc_flow_def = ActorVectorField(  
             hidden_dims=config['actor_hidden_dims'],
-            action_dim=full_action_dim,
+            action_dim=full_action_dim, # 输出维度是real action_dim * horizon_length
             layer_norm=config['actor_layer_norm'],
             encoder=encoders.get('actor_bc_flow'),
             use_fourier_features=config["use_fourier_features"],
             fourier_feature_dim=config["fourier_feature_dim"],
         )
-        actor_onestep_flow_def = ActorVectorField(
+        # 输出动作
+        actor_onestep_flow_def = ActorVectorField( # 跟上面相比，少了用傅里叶变换处理时间变量
             hidden_dims=config['actor_hidden_dims'],
             action_dim=full_action_dim,
             layer_norm=config['actor_layer_norm'],
@@ -300,11 +317,11 @@ class ACFQLAgent(flax.struct.PyTreeNode):
         else:
             network_tx = optax.adam(learning_rate=config['lr'])
         network_params = network_def.init(init_rng, **network_args)['params']
-        network = TrainState.create(network_def, network_params, tx=network_tx)
+        network = TrainState.create(network_def, network_params, tx=network_tx) # TrainState.create() 方法会将上述参数封装到一个 TrainState 对象中，TrainState 会自动管理模型的参数、优化器的状态等信息
 
         params = network.params
 
-        params[f'modules_target_critic'] = params[f'modules_critic']
+        params[f'modules_target_critic'] = params[f'modules_critic']  # 将 critic 网络 的参数复制到 target_critic 网络 中。
 
         config['ob_dims'] = ob_dims
         config['action_dim'] = action_dim
