@@ -31,7 +31,7 @@ def batched_random_crop(imgs, crop_froms, padding):
     return jax.vmap(random_crop, (0, 0, None))(imgs, crop_froms, padding)
 
 
-class Dataset(FrozenDict):
+class Dataset(FrozenDict):  # FrozenDict 是一种不可变字典，常用于 JAX 中
     """Dataset class."""
 
     @classmethod
@@ -45,19 +45,19 @@ class Dataset(FrozenDict):
         data = fields
         assert 'observations' in data
         if freeze:
-            jax.tree_util.tree_map(lambda arr: arr.setflags(write=False), data)
+            jax.tree_util.tree_map(lambda arr: arr.setflags(write=False), data)  # 对嵌套结构中的所有叶子节点（leaf nodes）应用一个函数。tree_map(fn, nested_structure)
         return cls(data)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.size = get_size(self._dict)
+        self.size = get_size(self._dict) # 通常它会遍历内部字典 self._dict 中各个数组的第一个维度，验证它们长度一致，并返回这个“轨迹长度”或“样本数”。
         self.frame_stack = None  # Number of frames to stack; set outside the class.
         self.p_aug = None  # Image augmentation probability; set outside the class.
         self.return_next_actions = False  # Whether to additionally return next actions; set outside the class.
 
         # Compute terminal and initial locations.
         self.terminal_locs = np.nonzero(self['terminals'] > 0)[0]
-        self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1])
+        self.initial_locs = np.concatenate([[0], self.terminal_locs[:-1] + 1]) # 终点的后一个位置就是起点
 
     def get_random_idxs(self, num_idxs):
         """Return `num_idxs` random indices."""
@@ -93,11 +93,12 @@ class Dataset(FrozenDict):
         idxs = np.random.randint(self.size - sequence_length + 1, size=batch_size)
         
         data = {k: v[idxs] for k, v in self.items()}
-
+        # print(data['rewards'].shape) # (256,)
         rewards = np.zeros(data['rewards'].shape + (sequence_length,), dtype=float)
-        masks = np.ones(data['masks'].shape + (sequence_length,), dtype=float)
+        # print("rewards shape:", rewards.shape)  # (256, 5)
+        masks = np.ones(data['masks'].shape + (sequence_length,), dtype=float) # 用来标记每个时间步是否有效。如果该时间步是有效的，mask 会是 1；如果时间步无效（即环境终止或无效状态），mask 会是 0。
         valid = np.ones(data['masks'].shape + (sequence_length,), dtype=float)
-        observations = np.zeros(data['observations'].shape[:-1] + (sequence_length, data['observations'].shape[-1]), dtype=float)
+        observations = np.zeros(data['observations'].shape[:-1] + (sequence_length, data['observations'].shape[-1]), dtype=float) # (N, sequence_length, feature_dim)。即每个批次中的每个样本将包含 sequence_length 个时间步的数据，每个时间步有 feature_dim 个特征
         next_observations = np.zeros(data['observations'].shape[:-1] + (sequence_length, data['observations'].shape[-1]), dtype=float)
         actions = np.zeros(data['actions'].shape[:-1] + (sequence_length, data['actions'].shape[-1]), dtype=float)
         terminals = np.zeros(data['terminals'].shape + (sequence_length,), dtype=float)
@@ -109,22 +110,23 @@ class Dataset(FrozenDict):
             cur_idxs = idxs + i
 
             if i == 0:
-                rewards[..., 0] = self['rewards'][cur_idxs]
+                rewards[..., 0] = self['rewards'][cur_idxs] # 存储到 rewards 数组的第一个时间步（i == 0）的位置
                 masks[..., 0] = self["masks"][cur_idxs]
                 terminals[..., 0] = self["terminals"][cur_idxs]
-            else:
+            else: # 对于后续时间步（i > 0），这部分代码会 累计奖励、更新掩码和终止标记：
+                # 走到第0个时间步的奖励：r1; 走到第1个时间步的奖励：r1+ r2*discount; 走到第2个时间步的奖励：r1 + r2 * discount + r3 * discount^2
                 rewards[..., i] = rewards[..., i - 1] + self['rewards'][cur_idxs] * (discount ** i)
                 masks[..., i] = np.minimum(masks[..., i-1], self["masks"][cur_idxs])
                 terminals[..., i] = np.maximum(terminals[..., i-1], self["terminals"][cur_idxs])
-                valid[..., i] = (1.0 - terminals[..., i - 1])
+                valid[..., i] = (1.0 - terminals[..., i - 1]) # 上一步没有terminate(0),当前步数是有效的（1）；上一步terminate(1),当前步数是无效的（0）
             
             actions[..., i, :] = self['actions'][cur_idxs]
             next_observations[..., i, :] = self['next_observations'][cur_idxs]
             observations[..., i, :] = self['observations'][cur_idxs]
             next_actions[..., i, :] = self['actions'][jnp.minimum(cur_idxs + 1, self.size - 1)]
-            
+        
         return dict(
-            observations=data['observations'].copy(),
+            observations=data['observations'].copy(), # observations是字典的键值，不是赋值
             full_observations=observations,
             actions=actions,
             masks=masks,

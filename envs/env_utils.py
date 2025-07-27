@@ -104,8 +104,9 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         # OGBench.
         env, train_dataset, val_dataset = ogbench.make_env_and_datasets(env_name)
         eval_env = ogbench.make_env_and_datasets(env_name, env_only=True)
-        env = EpisodeMonitor(env, filter_regexes=['.*privileged.*', '.*proprio.*'])
+        env = EpisodeMonitor(env, filter_regexes=['.*privileged.*', '.*proprio.*']) # 对环境返回的 observation做过滤，丢掉某些observation中的keys
         eval_env = EpisodeMonitor(eval_env, filter_regexes=['.*privileged.*', '.*proprio.*'])
+        # print(f'Using OGBench dataset: {train_dataset["observations"].shape}) ') # (3000000, 46)
         train_dataset = Dataset.create(**train_dataset)
         val_dataset = Dataset.create(**val_dataset)
     elif 'antmaze' in env_name and ('diverse' in env_name or 'play' in env_name or 'umaze' in env_name):
@@ -140,7 +141,7 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5):
         raise ValueError(f'Unsupported environment: {env_name}')
 
     if frame_stack is not None:
-        env = FrameStackWrapper(env, frame_stack)
+        env = FrameStackWrapper(env, frame_stack) # 把连续的多帧观测（如图像）堆叠在一起作为 agent 的输入，堆叠前frame_stack帧的观测
         eval_env = FrameStackWrapper(eval_env, frame_stack)
 
     env.reset()

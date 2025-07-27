@@ -16,7 +16,7 @@ nonpytree_field = functools.partial(flax.struct.field, pytree_node=False)
 class ModuleDict(nn.Module):
     """A dictionary of modules.
 
-    This allows sharing parameters between modules and provides a convenient way to access them.
+    This allows sharing parameters between nn modules and provides a convenient way to access them.
 
     Attributes:
         modules: Dictionary of modules.
@@ -44,8 +44,8 @@ class ModuleDict(nn.Module):
                 elif isinstance(value, Sequence):
                     out[key] = self.modules[key](*value)
                 else:
-                    out[key] = self.modules[key](value)
-            return out
+                    out[key] = self.modules[key](value)  
+            return out  # 最后返回所有子模块的输出，out 是一个字典，包含了所有子模块的输出结果
 
         return self.modules[name](*args, **kwargs)
 
@@ -73,7 +73,7 @@ class TrainState(flax.struct.PyTreeNode):
     def create(cls, model_def, params, tx=None, **kwargs):
         """Create a new train state."""
         if tx is not None:
-            opt_state = tx.init(params)
+            opt_state = tx.init(params)  # 优化器需要知道 每个参数的形状和结构,tx.init(params) 将根据参数的形状和结构，创建一个与 params 相同形状的优化器状态（opt_state）
         else:
             opt_state = None
 
@@ -119,8 +119,8 @@ class TrainState(flax.struct.PyTreeNode):
 
     def apply_gradients(self, grads, **kwargs):
         """Apply the gradients and return the updated state."""
-        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
-        new_params = optax.apply_updates(self.params, updates)
+        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params) # 这是根据优化算法计算出的参数增量；优化器更新后的新状态，将用于下一次的训练迭代。
+        new_params = optax.apply_updates(self.params, updates) # 将第一步计算出的“增量”实际应用到模型参数上。
 
         return self.replace(
             step=self.step + 1,
@@ -134,7 +134,7 @@ class TrainState(flax.struct.PyTreeNode):
 
         It additionally computes the gradient statistics and adds them to the dictionary.
         """
-        grads, info = jax.grad(loss_fn, has_aux=True)(self.params)
+        grads, info = jax.grad(loss_fn, has_aux=True)(self.params)  # # jax.grad 是对 loss_fn 的第一个参数求梯度, self,params其实在这里是传入loss_fn的第一个参数
 
         grad_max = jax.tree_util.tree_map(jnp.max, grads)
         grad_min = jax.tree_util.tree_map(jnp.min, grads)

@@ -11,7 +11,8 @@ def default_init(scale=1.0):
 
 
 def ensemblize(cls, num_qs, in_axes=None, out_axes=0, **kwargs):
-    """Ensemblize a module."""
+    """ensemblize() 是一个帮助函数，用于将一个模块（比如 MLP）转换为一个集成模型，
+    即 创建多个副本 来并行运行每个模型，并将其输出集成"""
     return nn.vmap(
         cls,
         variable_axes={'params': 0, 'intermediates': 0},
@@ -70,7 +71,7 @@ class MLP(nn.Module):
     @nn.compact
     def __call__(self, x):
         for i, size in enumerate(self.hidden_dims):
-            x = nn.Dense(size, kernel_init=self.kernel_init)(x)
+            x = nn.Dense(size, kernel_init=self.kernel_init)(x) # kernel_init指定了初始化每层参数的函数
             if i + 1 < len(self.hidden_dims) or self.activate_final:
                 x = self.activations(x)
                 if self.layer_norm:
@@ -190,7 +191,7 @@ class Value(nn.Module):
         mlp_class = MLP
         if self.num_ensembles > 1:
             mlp_class = ensemblize(mlp_class, self.num_ensembles)
-        value_net = mlp_class((*self.hidden_dims, 1), activate_final=False, layer_norm=self.layer_norm)
+        value_net = mlp_class((*self.hidden_dims, 1), activate_final=False, layer_norm=self.layer_norm)  # 创建 MLP 实例
 
         self.value_net = value_net
 
@@ -207,7 +208,7 @@ class Value(nn.Module):
             inputs = [observations]
         if actions is not None:
             inputs.append(actions)
-        inputs = jnp.concatenate(inputs, axis=-1)
+        inputs = jnp.concatenate(inputs, axis=-1) # 将观测和动作合并为一个大的输入张量，用于网络的处理
 
         v = self.value_net(inputs).squeeze(-1)
 
